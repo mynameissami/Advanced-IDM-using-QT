@@ -1,4 +1,4 @@
-# Internet Download Manager (C++ QT PROJ)
+# Advanced Internet Download Manager
 
 ## Project Overview
 This project is a robust Internet Download Manager application developed in C++ using the cross-platform Qt framework. It aims to provide users with a comprehensive tool for managing and accelerating their file downloads. The application features a modern graphical user interface (GUI) and integrates various functionalities to enhance the download experience, including detailed download information, customizable settings, and specialized dialogs for different download scenarios.
