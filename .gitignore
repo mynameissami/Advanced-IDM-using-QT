@@ -1,0 +1,30 @@
+# CMake build artifacts
+build/
+CMakeCache.txt
+CMakeFiles/
+
+# Qt Creator specific files
+*.user
+*.pro.user
+
+# Compiled object files and executables
+*.o
+*.obj
+*.exe
+*.dll
+*.so
+*.dylib
+*.a
+*.lib
+
+# Generated Qt files
+*.moc
+*.ui.h
+*.qrc.cpp
+
+# Other common ignores
+.vscode/
+.idea/
+*.log
+*.bak
+*~
