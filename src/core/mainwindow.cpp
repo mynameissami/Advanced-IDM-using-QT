@@ -1,12 +1,12 @@
 #include "mainwindow.h"
 #include "ui_mainwindow.h"
-#include "PreferencesDialog.h"
-#include "about.h"
-#include "speedlimiterdialog.h"
-#include "connectionsettingsdialog.h"
-#include "downloaditem.h"
-#include "downloadmanager.h"
-#include "youtubedownloaddialog.h"
+#include "../dialogs/PreferencesDialog.h"
+#include "../dialogs/about.h"
+#include "../dialogs/speedlimiterdialog.h"
+#include "../dialogs/connectionsettingsdialog.h"
+#include "../network/downloaditem.h"
+#include "../network/downloadmanager.h"
+#include "../dialogs/youtubedownloaddialog.h"
 
 #define MAX_CONCURRENT_DOWNLOADS 6 // this sets the max concurrent downloads
 
@@ -29,7 +29,7 @@
 #include <QApplication>
 #include <QRegularExpression>
 #include <QClipboard>
-#include "utils.h"
+#include "../utils/utils.h"
 bool speedLimitEnabled = false;
 int currentSpeedLimit = 0;
 

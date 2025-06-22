@@ -12,12 +12,12 @@
 #include <QJsonObject>
 #include <QNetworkProxy>
 #include <QSettings>
-#include "about.h"
-#include "downloadconfirmationdialog.h"
-#include "downloaddetailsdialog.h"
-#include "downloaditem.h"
+#include "../dialogs/about.h"
+#include "../dialogs/downloadconfirmationdialog.h"
+#include "../dialogs/downloaddetailsdialog.h"
+#include "../network/downloaditem.h"
 #include "QTcpServer"
-#include "downloadmanager.h"
+#include "../network/downloadmanager.h"
 
 QT_BEGIN_NAMESPACE
 namespace Ui { class MainWindow; }

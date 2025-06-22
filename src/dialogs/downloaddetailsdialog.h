@@ -2,7 +2,7 @@
 #define DOWNLOADDETAILSDIALOG_H
 
 #include <QDialog>
-#include "downloaditem.h"
+#include "../network/downloaditem.h"
 
 namespace Ui {
 class DownloadDetailsDialog;
