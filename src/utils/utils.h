@@ -29,5 +29,16 @@ inline QString formatTimeLeft(qint64 seconds) {
 
     return parts.join(" ");
 }
+inline qint64 parseSize(const QString& sizeStr) {
+    bool ok;
+    qreal value = sizeStr.left(sizeStr.size() - 1).toDouble(&ok);
+    if (!ok) return 0;
+    QString unit = sizeStr.right(1).toUpper();
+    if (unit == "B") return static_cast<qint64>(value);
+    if (unit == "K") return static_cast<qint64>(value * 1024);
+    if (unit == "M") return static_cast<qint64>(value * 1024 * 1024);
+    if (unit == "G") return static_cast<qint64>(value * 1024 * 1024 * 1024);
+    return 0;
+}
 
 #endif // UTILS_H

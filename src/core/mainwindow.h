@@ -56,6 +56,7 @@ private slots:
     void openFileLocation(DownloadItem *item);
 
 private:
+    int m_lastRowCount = 0;
     DownloadDetailsDialog *m_detailsDialog = nullptr;
     QNetworkAccessManager *networkManager;
     Ui::MainWindow *ui;

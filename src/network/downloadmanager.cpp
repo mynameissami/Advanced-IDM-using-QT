@@ -4,6 +4,7 @@
 #include <QRegularExpression>
 #include <QDir>
 #include <QTime>
+#include "../utils/utils.h"
 
 DownloadManager::DownloadManager(QObject *parent)
     : QObject(parent), m_maxConcurrentDownloads(3), m_globalSpeedLimit(0), m_speedLimitEnabled(false)
@@ -152,6 +153,7 @@ void DownloadManager::downloadYouTube(DownloadItem *item)
     process->start("yt-dlp", args);
     m_activeDownloads.append(item);
     emit queueStatusChanged(m_activeDownloads.size(), m_downloadQueue.size());
+
 }
 
 void DownloadManager::setProxy(const QNetworkProxy &proxy)
@@ -164,7 +166,14 @@ void DownloadManager::setGlobalSpeedLimit(qint64 bytesPerSec, bool enabled)
 {
     m_globalSpeedLimit = bytesPerSec;
     m_speedLimitEnabled = enabled;
-    for (DownloadItem *item : m_activeDownloads) applySettingsToItem(item);
+    for (DownloadItem *item : m_activeDownloads) {
+        if (item) { // Guard against null items
+            applySettingsToItem(item);
+            if (item->getState() == DownloadItem::Downloading) {
+                item->setSpeedLimit(m_speedLimitEnabled ? m_globalSpeedLimit : 0);
+            }
+        }
+    }
 }
 
 bool DownloadManager::isItemActive(DownloadItem *item) const
@@ -181,62 +190,85 @@ void DownloadManager::processQueue()
 {
     startNextInQueue();
 }
-
 void DownloadManager::downloadYouTubeWithOptions(DownloadItem *item, const QStringList &args)
 {
-    if (!item) return;
-
-    QString url = item->getUrl().toString();
-    QString outputPath = item->getFullFilePath(); // Should be set from dialog
-    QDir dir(QFileInfo(outputPath).absolutePath());
-    if (!dir.exists() && !dir.mkpath(".")) {
-        item->setState(DownloadItem::Failed);
-        emit item->failed(tr("Cannot create directory for output file: %1").arg(outputPath));
-        m_activeDownloads.removeOne(item);
-        emit queueStatusChanged(m_activeDownloads.size(), m_downloadQueue.size());
-        startNextInQueue();
+    if (!item) {
+        qCritical() << "Invalid DownloadItem in downloadYouTubeWithOptions";
         return;
     }
 
+    QString url = item->getUrl().toString();
+    QString outputPath = item->getFullFilePath();
     QProcess *process = new QProcess(this);
-    QStringList fullArgs = args; // Copy the input args
-    fullArgs << "-o" << outputPath << url; // Append items correctly
+    QStringList fullArgs = args;
+    fullArgs.removeAll("--restrict-filenames");
+    fullArgs << "--verbose" << "-o" << outputPath << url;
 
-    connect(process, &QProcess::readyReadStandardOutput, [item, process, this]() {
-        QString output = process->readAllStandardOutput();
-        QRegularExpression progressRegex("(\\d+\\.\\d+)% of (\\d+\\.\\d+)([KMG])iB");
+    qDebug() << "Starting yt-dlp with args:" << fullArgs << "for URL:" << url << "to" << outputPath;
+    connect(process, &QProcess::started, [process]() {
+        qDebug() << "yt-dlp process started, PID:" << process->processId();
+    });
+    connect(process, &QProcess::readyReadStandardOutput, [process, item, this]() {
+        QByteArray output = process->readAllStandardOutput();
+        qDebug() << "yt-dlp output:" << output;
+        // Parse yt-dlp output for progress (e.g., "[download] XX% of YY")
+        QRegularExpression progressRegex("\\[download\\]\\s+(\\d+\\.\\d+)% of\\s+(\\d+\\.\\d+[KMG]?B)");
         QRegularExpressionMatch match = progressRegex.match(output);
         if (match.hasMatch()) {
             qreal percent = match.captured(1).toDouble();
-            QString sizeStr = match.captured(2) + match.captured(3);
-            bool ok;
-            qreal sizeValue = sizeStr.left(sizeStr.size() - 2).toDouble(&ok);
-            if (ok) {
-                qreal multiplier = (match.captured(3) == "G") ? 1e9 : (match.captured(3) == "M") ? 1e6 : 1e3;
-                qint64 totalSize = static_cast<qint64>(sizeValue * multiplier);
-                qint64 downloadedSize = static_cast<qint64>((percent / 100.0) * totalSize);
-                item->setTotalSize(totalSize);
-                item->setDownloadedSize(downloadedSize);
-                emit item->progress(downloadedSize, totalSize);
-            }
+            QString totalStr = match.captured(2);
+            qint64 totalSize = parseSize(totalStr); // Assume Utils::parseSize converts "1.5MB" to bytes
+            qint64 downloadedSize = (percent / 100.0) * totalSize;
+            item->setTotalSize(totalSize);
+            item->setDownloadedSize(downloadedSize);
+            emit item->progress(downloadedSize, totalSize);
         }
     });
-
-    connect(process, &QProcess::finished, [this, item, process](int exitCode, QProcess::ExitStatus) {
-        if (exitCode == 0) {
-            item->setState(DownloadItem::Completed);
-            emit item->finished();
-        } else {
+    connect(process, &QProcess::readyReadStandardError, [process, item, this]() {
+        QByteArray error = process->readAllStandardError();
+        qDebug() << "yt-dlp error:" << error;
+        if (error.contains("ERROR")) {
             item->setState(DownloadItem::Failed);
-            emit item->failed(tr("yt-dlp failed: %1").arg(process->readAllStandardError()));
+            emit item->failed(error);
         }
-        process->deleteLater();
+    });
+    connect(process, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
+            [this, item, process](int exitCode, QProcess::ExitStatus) {
+                if (!item || !process) {
+                    qCritical() << "Invalid item or process in finished slot";
+                    return;
+                }
+                QByteArray output = process->readAllStandardOutput();
+                QByteArray error = process->readAllStandardError();
+                qDebug() << "yt-dlp finished with exit code:" << exitCode << "Output:" << output << "Error:" << error;
+                if (exitCode == 0) {
+                    item->setState(DownloadItem::Completed);
+                    emit item->finished();
+                } else {
+                    qCritical() << "yt-dlp failed with error:" << error;
+                    item->setState(DownloadItem::Failed);
+                    emit item->failed(tr("yt-dlp failed with exit code %1: %2").arg(exitCode).arg(QString(error)));
+                }
+                process->deleteLater();
+                m_activeDownloads.removeOne(item);
+                emit queueStatusChanged(m_activeDownloads.size(), m_downloadQueue.size());
+                startNextInQueue();
+            });
+    connect(process, &QProcess::errorOccurred, [this, process, item](QProcess::ProcessError error) {
+        qCritical() << "yt-dlp process error:" << error << "Details:" << process->errorString()
+        << "for" << (item ? item->getUrl().toString() : "null item");
+        if (process) process->deleteLater();
+        if (item) {
+            item->setState(DownloadItem::Failed);
+            emit item->failed(tr("Process error: %1").arg(process->errorString()));
+        }
         m_activeDownloads.removeOne(item);
         emit queueStatusChanged(m_activeDownloads.size(), m_downloadQueue.size());
         startNextInQueue();
     });
 
     if (QProcess::execute("yt-dlp", {"--version"}) != 0) {
+        qCritical() << "yt-dlp not found in PATH";
         item->setState(DownloadItem::Failed);
         emit item->failed("yt-dlp is not installed or not found in PATH. Please install it.");
         m_activeDownloads.removeOne(item);
@@ -245,8 +277,31 @@ void DownloadManager::downloadYouTubeWithOptions(DownloadItem *item, const QStri
         return;
     }
 
+    QFileInfo fileInfo(outputPath);
+    if (!fileInfo.dir().exists() || !fileInfo.dir().Writable) {
+        qCritical() << "Invalid or unwritable path:" << outputPath;
+        item->setState(DownloadItem::Failed);
+        emit item->failed("Invalid or unwritable output path.");
+        m_activeDownloads.removeOne(item);
+        emit queueStatusChanged(m_activeDownloads.size(), m_downloadQueue.size());
+        startNextInQueue();
+        return;
+    }
+
     item->setState(DownloadItem::Downloading);
-    process->start("yt-dlp", fullArgs);
-    m_activeDownloads.append(item);
-    emit queueStatusChanged(m_activeDownloads.size(), m_downloadQueue.size());
+    QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
+    env.insert("PATH", env.value("PATH") + ";C:\\Python39\\Scripts");
+    process->setProcessEnvironment(env);
+    if (QProcess::execute("yt-dlp", {"--version"}) != 0) {
+        qCritical() << "Failed to start yt-dlp:" << process->errorString();
+        item->setState(DownloadItem::Failed);
+        emit item->failed(tr("Failed to start process: %1").arg(process->errorString()));
+        process->deleteLater();
+        m_activeDownloads.removeOne(item);
+        emit queueStatusChanged(m_activeDownloads.size(), m_downloadQueue.size());
+        startNextInQueue();
+    } else {
+        m_activeDownloads.append(item);
+        emit queueStatusChanged(m_activeDownloads.size(), m_downloadQueue.size());
+    }
 }

@@ -8,7 +8,12 @@
 #include <QNetworkAccessManager>
 #include <QTimer>
 #include <QNetworkProxy>
-#include <qmutex.h>
+#include <QMutex>
+#include <QThread>
+#include <QElapsedTimer>
+
+// Forward declaration
+class SpeedLimitWorker;
 
 class DownloadItem : public QObject
 {
@@ -34,7 +39,6 @@ public:
     void setUrl(const QUrl &url) { m_url = url; }
     void setLastTryDate(const QDateTime &date) { m_lastTryDate = date; }
     void setDescription(const QString &desc) { m_description = desc; }
-    // *** FIX: Re-added setters for history loading ***
     void setTotalSize(qint64 size) { m_totalSize = size; }
     void setDownloadedSize(qint64 size) { m_downloadedSize = size; }
     void setFullFilePath(const QString &path);
@@ -54,6 +58,9 @@ public:
     int getNumChunks() const { return m_numChunks; }
     bool isSingleChunk() const { return m_isSingleChunk; }
 
+    // Friend declaration to allow SpeedLimitWorker access to private members
+    friend class SpeedLimitWorker;
+
 signals:
     void progress(qint64 bytesReceived, qint64 bytesTotal);
     void finished();
@@ -71,7 +78,6 @@ private slots:
     void onGetFinished();
 
 private:
-
     void enforceSpeedLimit(qint64 bytesToRead);
     void fetchTotalSize();
     void startChunkDownloads();
@@ -109,15 +115,31 @@ private:
     qint64 m_bytesLastPeriod;
     qint64 m_transferRate;
 
-    QTimer *m_speedTimer;
-    qint64 m_speedLimit;
-    qint64 m_bytesReadThisSecond;
+    qint64 m_speedLimit = 0;
+    qint64 m_bytesReadThisSecond = 0;
     QElapsedTimer m_speedLimitTimer;
     QMutex m_speedLimitMutex;
+    SpeedLimitWorker* m_worker = nullptr;
+    QThread* m_workerThread = nullptr;
     QDateTime m_lastTryDate;
     QString m_description;
     QMutex m_chunkMutex;
     bool validateChunk(int chunkIndex);
+};
+
+// Definition of SpeedLimitWorker outside DownloadItem
+class SpeedLimitWorker : public QObject {
+    Q_OBJECT
+public:
+    explicit SpeedLimitWorker(DownloadItem* parent);
+    ~SpeedLimitWorker();
+
+public slots:
+    void enforceLimit(qint64 bytesToRead);
+
+private:
+    DownloadItem* m_parent;
+    QElapsedTimer* m_timer;
 };
 
 #endif // DOWNLOADITEM_H

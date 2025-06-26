@@ -37,7 +37,7 @@ private slots:
 private:
     void startNextInQueue();
     void applySettingsToItem(DownloadItem *item);
-
+    QTimer m_processTimeout;
     QList<DownloadItem*> m_downloadQueue;
     QList<DownloadItem*> m_activeDownloads;
     int m_maxConcurrentDownloads;

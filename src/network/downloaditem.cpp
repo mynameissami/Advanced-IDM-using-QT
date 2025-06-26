@@ -4,6 +4,7 @@
 #include <QDir>
 #include <QDebug>
 #include <QThread>
+#include <algorithm>
 
 DownloadItem::DownloadItem(const QUrl &url, const QString &filePath, QObject *parent)
     : QObject(parent), m_url(url), m_fullFilePath(filePath), m_totalSize(-1), m_downloadedSize(0),
@@ -25,20 +26,28 @@ DownloadItem::DownloadItem(const QUrl &url, const QString &filePath, QObject *pa
 
 /**
  * Destructor for the DownloadItem class.
- * Stops any ongoing download and ensures cleanup by deleting the network manager.
+ * Stops any ongoing download, terminates the worker thread, and cleans up resources.
  */
-
 DownloadItem::~DownloadItem()
 {
     stop();
+    if (m_workerThread) {
+        m_workerThread->quit(); // Request thread to stop
+        if (!m_workerThread->wait(5000)) { // Wait up to 5 seconds
+            qWarning() << "Worker thread did not stop for" << m_fileName << ", forcing termination";
+            m_workerThread->terminate();
+            m_workerThread->wait();
+        }
+        delete m_workerThread;
+        m_workerThread = nullptr;
+    }
+    delete m_worker;
+    m_worker = nullptr;
     delete m_manager; // Direct deletion to ensure cleanup
 }
 
 /**
  * @brief Creates a QNetworkRequest object with custom attributes set.
- *
- * @param url The URL for the request.
- * @return A QNetworkRequest object with HTTP pipelining enabled, cache control set to always use network, and a user agent string set to a modern browser.
  */
 QNetworkRequest DownloadItem::createNetworkRequest(const QUrl &url)
 {
@@ -50,12 +59,7 @@ QNetworkRequest DownloadItem::createNetworkRequest(const QUrl &url)
 }
 
 /**
- * @brief Sets the state of the DownloadItem and emits a stateChanged signal
- *        if the state changes.
- *
- * @param state The new state of the DownloadItem.
- *
- * @note If the state does not change, no signal is emitted.
+ * @brief Sets the state of the DownloadItem and emits a stateChanged signal if the state changes.
  */
 void DownloadItem::setState(State state)
 {
@@ -67,54 +71,118 @@ void DownloadItem::setState(State state)
 
 /**
  * @brief Sets the network proxy for the DownloadItem.
- *
- * @param proxy The QNetworkProxy object to be used for network requests.
- *
- * @details This function assigns the specified proxy to the network 
- * manager used by the DownloadItem if the network manager is initialized.
  */
-
 void DownloadItem::setProxy(const QNetworkProxy &proxy)
 {
     if (m_manager) m_manager->setProxy(proxy);
 }
 
-
 /**
  * @brief Sets the speed limit of the DownloadItem in bytes per second.
- *
- * @details The speed limit is enforced by pausing the download thread if the
- *          limit is exceeded. The speed limit is reset every second.
- *
- * @param bytesPerSec The speed limit to set in bytes per second.
  */
 void DownloadItem::setSpeedLimit(qint64 bytesPerSec)
 {
     QMutexLocker locker(&m_speedLimitMutex);
+    qDebug() << "Setting speed limit to" << bytesPerSec << "for" << m_fileName
+             << "(state:" << m_state << ", thread:" << QThread::currentThreadId() << ")";
+    if (m_state == Failed || m_state == Completed) {
+        qWarning() << "Ignoring speed limit change for" << m_fileName << "in state" << m_state;
+        return;
+    }
     m_speedLimit = bytesPerSec;
     m_bytesReadThisSecond = 0;
     m_speedLimitTimer.restart();
+
+    if (!m_worker) {
+        m_worker = new SpeedLimitWorker(this);
+        m_workerThread = new QThread(this);
+        m_worker->moveToThread(m_workerThread);
+        connect(m_workerThread, &QThread::started, m_worker, [this]() {
+            QMetaObject::invokeMethod(m_worker, "enforceLimit", Qt::QueuedConnection, Q_ARG(qint64, 0));
+        }, Qt::QueuedConnection);
+        m_workerThread->start();
+        qDebug() << "Worker thread started for" << m_fileName;
+    }
 }
 
 void DownloadItem::enforceSpeedLimit(qint64 bytesToRead)
 {
-    if (m_speedLimit <= 0) return;
+    if (m_speedLimit <= 0 || !m_worker || !m_workerThread || !m_workerThread->isRunning()) {
+        qDebug() << "No speed limit or worker unavailable for" << m_fileName;
+        return;
+    }
 
     QMutexLocker locker(&m_speedLimitMutex);
     qint64 elapsed = m_speedLimitTimer.elapsed();
-    if (elapsed >= 1000) {
-        m_bytesReadThisSecond = 0;
-        m_speedLimitTimer.restart();
-    } else if (m_bytesReadThisSecond + bytesToRead > m_speedLimit) {
-        qint64 excess = m_bytesReadThisSecond + bytesToRead - m_speedLimit;
-        qint64 sleepTime = (excess * 1000) / m_speedLimit;
-        if (sleepTime > 0) QThread::msleep(sleepTime);
-        m_bytesReadThisSecond = 0;
-        m_speedLimitTimer.restart();
-    }
     m_bytesReadThisSecond += bytesToRead;
+
+    if (elapsed >= 1000) {
+        m_bytesReadThisSecond = 0; // Reset fully at second boundary
+        m_speedLimitTimer.restart();
+    } else if (m_bytesReadThisSecond > m_speedLimit) {
+        qint64 excess = m_bytesReadThisSecond - m_speedLimit;
+        qint64 sleepTime = (excess * 1000) / qMax<qint64>(1, m_speedLimit);
+        if (sleepTime > 0) {
+            qDebug() << "Throttling" << m_fileName << "sleeping for" << sleepTime << "ms, excess:" << excess;
+            QThread::msleep(static_cast<quint64>(sleepTime));
+            m_bytesReadThisSecond = bytesToRead; // Reset to current read after sleep
+        }
+    }
+
+    QMetaObject::invokeMethod(m_worker, "enforceLimit", Qt::QueuedConnection, Q_ARG(qint64, bytesToRead));
 }
 
+SpeedLimitWorker::SpeedLimitWorker(DownloadItem* parent) : m_parent(parent), m_timer(new QElapsedTimer())
+{
+    m_timer->start();
+    if (m_parent) {
+        qDebug() << "SpeedLimitWorker created for" << m_parent->m_fileName << "in thread" << QThread::currentThreadId();
+    } else {
+        qDebug() << "SpeedLimitWorker created with null parent in thread" << QThread::currentThreadId();
+    }
+}
+
+SpeedLimitWorker::~SpeedLimitWorker()
+{
+    delete m_timer;
+    if (m_parent) {
+        qDebug() << "SpeedLimitWorker destroyed for" << m_parent->m_fileName;
+    } else {
+        qDebug() << "SpeedLimitWorker destroyed with null parent";
+    }
+}
+
+void SpeedLimitWorker::enforceLimit(qint64 bytesToRead)
+{
+    if (!m_parent || m_parent->m_speedLimit <= 0) {
+        qDebug() << "No speed limit or parent invalid for" << (m_parent ? m_parent->m_fileName : "unknown");
+        return;
+    }
+
+    QMutexLocker locker(&m_parent->m_speedLimitMutex);
+    qint64 elapsed = m_timer->elapsed();
+    qint64 totalBytes = m_parent->m_bytesReadThisSecond + bytesToRead;
+
+    qDebug() << "Enforcing limit: elapsed=" << elapsed << ", bytesToRead=" << bytesToRead
+             << ", bytesReadThisSecond=" << m_parent->m_bytesReadThisSecond << ", totalBytes=" << totalBytes;
+
+    if (elapsed >= 1000) {
+        m_parent->m_bytesReadThisSecond = bytesToRead;
+        m_timer->restart();
+    } else if (totalBytes > m_parent->m_speedLimit) {
+        qint64 excess = totalBytes - m_parent->m_speedLimit;
+        qint64 sleepTime = (excess * 1000) / qMax<qint64>(1, m_parent->m_speedLimit);
+        if (sleepTime > 0) {
+            qDebug() << "Worker throttling" << m_parent->m_fileName << "sleeping for" << sleepTime << "ms";
+            QThread::msleep(static_cast<quint64>(sleepTime));
+            m_parent->m_bytesReadThisSecond = bytesToRead;
+        }
+    } else {
+        m_parent->m_bytesReadThisSecond = totalBytes;
+    }
+}
+
+// This will start download and file in the current queue, except for which is completed or Downloading
 void DownloadItem::start()
 {
     if (m_state == Downloading || m_state == Completed) return;
@@ -127,6 +195,8 @@ void DownloadItem::start()
 
     QFileInfo fileInfo(m_fullFilePath);
     QDir dir = fileInfo.absoluteDir();
+    setFullFilePath(m_fullFilePath);
+    qDebug () << "File Path"<<dir;
     if (!dir.exists() && !dir.mkpath(".")) {
         setState(Failed);
         emit failed("Could not create download directory");
@@ -136,54 +206,6 @@ void DownloadItem::start()
     setState(Downloading);
     setLastTryDate(QDateTime::currentDateTime());
     fetchTotalSize();
-}
-
-void DownloadItem::startSingleChunkDownload()
-{
-    if (!m_url.isValid() || m_state != Downloading) return;
-
-    m_file = new QFile(m_fullFilePath);
-    if (!m_file || (!m_file->open(QFile::exists(m_fullFilePath) ? QIODevice::Append : QIODevice::WriteOnly))) {
-        delete m_file;
-        m_file = nullptr;
-        setState(Failed);
-        emit failed("Could not open output file");
-        return;
-    }
-
-    m_downloadedSize = QFile::exists(m_fullFilePath) ? m_file->size() : 0;
-    QNetworkRequest request = createNetworkRequest(m_url);
-    if (m_downloadedSize > 0) request.setRawHeader("Range", QString("bytes=%1-").arg(m_downloadedSize).toUtf8());
-
-    m_reply = m_manager->get(request);
-    if (!m_reply) {
-        m_file->close();
-        delete m_file;
-        m_file = nullptr;
-        setState(Failed);
-        emit failed("Failed to initiate download");
-        return;
-    }
-
-    connect(m_reply, &QNetworkReply::readyRead, this, &DownloadItem::onSingleChunkReadyRead);
-    connect(m_reply, &QNetworkReply::finished, this, &DownloadItem::onSingleChunkFinished);
-    connect(m_reply, &QNetworkReply::errorOccurred, this, &DownloadItem::onError);
-}
-
-void DownloadItem::onSingleChunkReadyRead()
-{
-    if (!m_reply || !m_file || !m_file->isOpen()) return;
-
-    QByteArray data = m_reply->readAll();
-    if (data.isEmpty()) return;
-
-    enforceSpeedLimit(data.size());
-    qint64 bytesWritten = m_file->write(data);
-    if (bytesWritten > 0) {
-        m_downloadedSize += bytesWritten;
-        if (m_totalSize <= 0) m_totalSize = m_reply->header(QNetworkRequest::ContentLengthHeader).toLongLong();
-        emit progress(m_downloadedSize, m_totalSize > 0 ? m_totalSize : m_downloadedSize);
-    }
 }
 
 void DownloadItem::fetchTotalSize()
@@ -202,25 +224,24 @@ void DownloadItem::fetchTotalSize()
 
 /**
  * Handles the completion of the HEAD request.
- *
- * This function is called when the HEAD request finishes, whether it is successful
- * or encounters an error. It attempts to determine the total size of the file to be
- * downloaded and checks if the server supports range requests (necessary for chunked downloads).
- * If the HEAD request is successful, it sets the total size and the chunking strategy.
- * If the HEAD request fails, it defaults to a single chunk download and attempts to
- * retrieve the file size using a GET request as a fallback.
  */
-
 void DownloadItem::onHeadFinished()
 {
-    if (!m_reply) return;
+    if (!m_reply) {
+        qCritical() << "Null reply in onHeadFinished";
+        setState(Failed);
+        emit failed("Null network reply");
+        return;
+    }
 
     if (m_reply->error() == QNetworkReply::NoError) {
         m_totalSize = m_reply->header(QNetworkRequest::ContentLengthHeader).toLongLong();
         m_supportsRange = m_reply->rawHeader("Accept-Ranges").toLower().contains("bytes");
         m_isSingleChunk = !m_supportsRange || m_totalSize <= 0;
         m_numChunks = m_isSingleChunk ? 1 : qBound(4, (int)(m_totalSize / (5 * 1024 * 1024)), 16);
+        qDebug() << "onHeadFinished: totalSize=" << m_totalSize << ", supportsRange=" << m_supportsRange << ", isSingleChunk=" << m_isSingleChunk;
     } else {
+        qWarning() << "HEAD request failed:" << m_reply->errorString() << ", falling back to GET";
         m_isSingleChunk = true;
         m_numChunks = 1;
         fetchSizeWithGet(); // Fallback to GET if HEAD fails
@@ -229,18 +250,12 @@ void DownloadItem::onHeadFinished()
     m_reply->deleteLater();
     m_reply = nullptr;
     if (m_state != Failed && !m_isSingleChunk) startChunkDownloads();
+    else if (m_state != Failed) startSingleChunkDownload();
 }
 
 /**
  * Initiates a GET request to estimate the file size as a fallback.
- *
- * This method is called when the HEAD request fails. It attempts to
- * determine the total size of the file by issuing a GET request. If
- * the URL is invalid, the download is marked as failed. Upon successful
- * initiation of the GET request, it connects the necessary signals to
- * handle ready read, finished, and error events.
  */
-
 void DownloadItem::fetchSizeWithGet()
 {
     if (!m_url.isValid()) {
@@ -311,11 +326,95 @@ void DownloadItem::startChunkDownloads()
     emit progress(m_downloadedSize, m_totalSize);
 }
 
+void DownloadItem::startSingleChunkDownload()
+{
+    if (!m_url.isValid() || m_state != Downloading) return;
+
+    if (m_file) {
+        m_file->close();
+        delete m_file;
+        m_file = nullptr;
+    }
+    m_file = new QFile(m_fullFilePath);
+    if (!m_file || (!m_file->open(QFile::exists(m_fullFilePath) ? QIODevice::Append : QIODevice::WriteOnly))) {
+        qCritical() << "Failed to open file:" << m_fullFilePath << m_file->errorString();
+        delete m_file;
+        m_file = nullptr;
+        setState(Failed);
+        emit failed("Could not open output file: " + m_file->errorString());
+        return;
+    }
+
+    m_downloadedSize = QFile::exists(m_fullFilePath) ? m_file->size() : 0;
+    QNetworkRequest request = createNetworkRequest(m_url);
+    if (m_downloadedSize > 0) request.setRawHeader("Range", QString("bytes=%1-").arg(m_downloadedSize).toUtf8());
+
+    m_reply = m_manager->get(request);
+    if (!m_reply) {
+        m_file->close();
+        delete m_file;
+        m_file = nullptr;
+        setState(Failed);
+        emit failed("Failed to initiate download");
+        return;
+    }
+
+    connect(m_reply, &QNetworkReply::readyRead, this, &DownloadItem::onSingleChunkReadyRead, Qt::UniqueConnection);
+    connect(m_reply, &QNetworkReply::finished, this, &DownloadItem::onSingleChunkFinished, Qt::UniqueConnection);
+    connect(m_reply, &QNetworkReply::errorOccurred, this, &DownloadItem::onError, Qt::UniqueConnection);
+}
+
+void DownloadItem::onSingleChunkReadyRead()
+{
+    if (!m_reply || !m_file || !m_file->isOpen()) {
+        qCritical() << "Invalid state in onSingleChunkReadyRead: reply=" << m_reply << ", file=" << m_file;
+        if (m_reply) m_reply->abort();
+        if (m_file) {
+            m_file->close();
+            delete m_file;
+            m_file = nullptr;
+        }
+        setState(Failed);
+        emit failed("Invalid file or reply state");
+        return;
+    }
+
+    qint64 maxRead = m_speedLimit > 0 ? qMin(m_reply->bytesAvailable(), m_speedLimit / 100) : m_reply->bytesAvailable();
+    QByteArray data = m_reply->read(maxRead);
+    if (data.isEmpty()) {
+        qDebug() << "No data received, checking reply error:" << m_reply->errorString();
+        return;
+    }
+
+    enforceSpeedLimit(data.size()); // Enforce limit before writing
+    qint64 bytesWritten = m_file->write(data);
+    if (bytesWritten <= 0) {
+        qCritical() << "Write failed:" << m_file->errorString() << "for" << m_fileName;
+        m_file->close();
+        delete m_file;
+        m_file = nullptr;
+        setState(Failed);
+        emit failed("Failed to write to file: " + m_file->errorString());
+        return;
+    }
+
+    m_downloadedSize += bytesWritten;
+    if (m_totalSize <= 0) {
+        QVariant contentLength = m_reply->header(QNetworkRequest::ContentLengthHeader);
+        m_totalSize = contentLength.isValid() ? contentLength.toLongLong() : m_downloadedSize;
+    }
+    emit progress(m_downloadedSize, m_totalSize > 0 ? m_totalSize : m_downloadedSize);
+}
 void DownloadItem::onSingleChunkFinished()
 {
-    if (!m_reply) return;
+    if (!m_reply) {
+        qCritical() << "Null reply in onSingleChunkFinished";
+        return;
+    }
 
-    if (m_file && m_file->isOpen()) m_file->close();
+    if (m_file && m_file->isOpen()) {
+        m_file->close();
+    }
     if (m_reply->error() == QNetworkReply::NoError) {
         if (m_totalSize <= 0) m_totalSize = m_downloadedSize;
         setState(Completed);
@@ -325,8 +424,10 @@ void DownloadItem::onSingleChunkFinished()
         emit failed(m_reply->errorString());
     }
 
-    m_reply->deleteLater();
-    m_reply = nullptr;
+    if (m_reply) {
+        m_reply->deleteLater();
+        m_reply = nullptr;
+    }
     delete m_file;
     m_file = nullptr;
 }
@@ -343,7 +444,7 @@ void DownloadItem::pause()
     m_rateTimer->stop();
 
     if (m_reply) {
-        disconnect(m_reply, nullptr, this, nullptr); 
+        disconnect(m_reply, nullptr, this, nullptr);
         m_reply->abort();
         m_reply->deleteLater();
         m_reply = nullptr;
@@ -351,13 +452,13 @@ void DownloadItem::pause()
 
     if (m_isSingleChunk && m_file) {
         if (m_file->isOpen()) {
-            m_file->flush(); 
+            m_file->flush();
             m_file->close();
         }
         delete m_file;
         m_file = nullptr;
     } else {
-        cleanup(false); 
+        cleanup(false);
     }
 
     emit progress(m_downloadedSize, m_totalSize);
@@ -518,10 +619,11 @@ void DownloadItem::onChunkReadyRead(int chunkIndex)
 {
     if (!m_chunkReplies[chunkIndex] || !m_chunkFiles[chunkIndex]) return;
 
-    QByteArray data = m_chunkReplies[chunkIndex]->readAll();
+    qint64 maxRead = m_speedLimit > 0 ? qMin(m_chunkReplies[chunkIndex]->bytesAvailable(), m_speedLimit / 100) : m_chunkReplies[chunkIndex]->bytesAvailable();
+    QByteArray data = m_chunkReplies[chunkIndex]->read(maxRead);
     if (data.isEmpty()) return;
 
-    enforceSpeedLimit(data.size());
+    enforceSpeedLimit(data.size()); // Enforce limit per chunk
     qint64 bytesWritten = m_chunkFiles[chunkIndex]->write(data);
     if (bytesWritten > 0) {
         m_chunkDownloaded[chunkIndex] += bytesWritten;
@@ -623,7 +725,9 @@ bool DownloadItem::validateChunk(int chunkIndex)
     QFile chunkFile(chunkFileName);
     return chunkFile.exists() && chunkFile.size() == m_chunkDownloaded[chunkIndex];
 }
+
 void DownloadItem::setFullFilePath(const QString &path)
 {
     m_fullFilePath = path;
+    qDebug() << "Setting full file path for" << m_fileName << "to" << path;
 }

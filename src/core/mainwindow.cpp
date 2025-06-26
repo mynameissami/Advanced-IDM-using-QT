@@ -121,8 +121,8 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), ui(new Ui::MainWi
     contextMenu->addAction(youtubeAction);
     contextMenu->addAction(detailsAction);
 
-    m_openFileLocationAction = new QAction(tr("Open File Location"), this);
-    connect(m_openFileLocationAction, &QAction::triggered, this, [this]() {
+    openfilelocation = new QAction(tr("Open File Location"), this);
+    connect(openfilelocation, &QAction::triggered, this, [this]() {
         int row = ui->downloadsTable->currentRow();
         DownloadItem *item = getDownloadItemForRow(row);
         if (item) openFileLocation(item);
@@ -377,7 +377,14 @@ void MainWindow::openFileLocation(DownloadItem *item)
     }
 
     QString filePath = item->getFullFilePath();
+    if (filePath.isEmpty()) {
+        qDebug() << "openFileLocation: Empty file path for" << item->getFileName();
+        QMessageBox::warning(this, tr("Error"), tr("The file path is empty for %1.").arg(item->getFileName()));
+        return;
+    }
+
     QFileInfo fileInfo(filePath);
+    qDebug() << "openFileLocation: Checking file" << filePath << ", exists:" << fileInfo.exists();
     if (!fileInfo.exists()) {
         qDebug() << "openFileLocation: File does not exist:" << filePath;
         QMessageBox::warning(this, tr("File Not Found"), tr("The file %1 does not exist.").arg(fileInfo.fileName()));
@@ -385,17 +392,22 @@ void MainWindow::openFileLocation(DownloadItem *item)
     }
 
     QDir dir = fileInfo.absoluteDir();
+    QString dirPath = dir.absolutePath();
+    qDebug() << "openFileLocation: Checking directory" << dirPath << ", exists:" << dir.exists();
     if (!dir.exists()) {
-        qDebug() << "openFileLocation: Directory does not exist:" << dir.absolutePath();
+        qDebug() << "openFileLocation: Directory does not exist:" << dirPath;
         QMessageBox::warning(this, tr("Directory Not Found"), tr("The directory for %1 does not exist.").arg(fileInfo.fileName()));
         return;
     }
 
-    qDebug() << "Opening file location for:" << filePath;
-    QUrl dirUrl = QUrl::fromLocalFile(dir.absolutePath());
+    qDebug() << "openFileLocation: Attempting to open directory" << dirPath;
+    QUrl dirUrl = QUrl::fromLocalFile(dirPath);
+    qDebug() << "openFileLocation: Generated URL:" << dirUrl.toString();
     if (!QDesktopServices::openUrl(dirUrl)) {
-        qDebug() << "openFileLocation: Failed to open directory:" << dir.absolutePath();
-        QMessageBox::warning(this, tr("Error"), tr("Failed to open the file location."));
+        qDebug() << "openFileLocation: Failed to open directory:" << dirPath << ", error may depend on platform";
+        QMessageBox::warning(this, tr("Error"), tr("Failed to open the file location for %1.").arg(fileInfo.fileName()));
+    } else {
+        qDebug() << "openFileLocation: Successfully opened directory:" << dirPath;
     }
 }
 void MainWindow::showContextMenu(const QPoint &pos)
@@ -815,16 +827,29 @@ void MainWindow::openSpeedLimiterDialog()
     SpeedLimiterDialog dialog(this);
 
     dialog.setSpeedLimitEnabled(speedLimitEnabled);
-    dialog.setSpeedLimitKBps(currentSpeedLimit / 1024);
+    dialog.setSpeedLimitKBps(currentSpeedLimit > 0 ? currentSpeedLimit / 1024 : 0);
 
     if (dialog.exec() == QDialog::Accepted) {
         speedLimitEnabled = dialog.isSpeedLimitEnabled();
-        currentSpeedLimit = dialog.getSpeedLimitKBps() * 1024;
+        qint64 newLimitKBps = dialog.getSpeedLimitKBps();
+        currentSpeedLimit = newLimitKBps > 0 ? newLimitKBps * 1024 : 0;
 
+        qint64 limit = speedLimitEnabled ? currentSpeedLimit : 0;
+        qDebug() << "Applying speed limit:" << limit << "bytes/s, enabled:" << speedLimitEnabled;
+        if (m_downloadManager) { // Guard against null manager
+            m_downloadManager->setGlobalSpeedLimit(limit, speedLimitEnabled);
+        } else {
+            qWarning() << "DownloadManager is null, cannot apply speed limit";
+        }
+
+        QMutexLocker locker(&mutex);
         for (auto& list : categories) {
             for (DownloadItem* item : list) {
                 if (item) {
-                    item->setSpeedLimit(speedLimitEnabled ? currentSpeedLimit : 0);
+                    qDebug() << "Setting speed limit for" << item->getFileName() << "to" << limit;
+                    item->setSpeedLimit(limit);
+                } else {
+                    qWarning() << "Null item in categories list";
                 }
             }
         }
@@ -838,23 +863,23 @@ void MainWindow::toggleSpeedLimiter(bool enabled)
 {
     speedLimitEnabled = enabled;
 
-    if (enabled) {
-        qint64 limit = currentSpeedLimit > 0 ? currentSpeedLimit : 100 * 1024;
-        m_downloadManager->setGlobalSpeedLimit(limit, true);
-
-        for (auto& list : categories) {
-            for (DownloadItem* item : list) {
-                if (item) {
-                    item->setSpeedLimit(limit);
-                }
-            }
-        }
+    qint64 defaultLimit = 100 * 1024;
+    qint64 limit = speedLimitEnabled ? (currentSpeedLimit > 0 ? currentSpeedLimit : defaultLimit) : 0;
+    qDebug() << "Toggling speed limit to" << limit << "bytes/s, enabled:" << enabled;
+    if (m_downloadManager) {
+        m_downloadManager->setGlobalSpeedLimit(limit, speedLimitEnabled);
     } else {
-        for (auto& list : categories) {
-            for (DownloadItem* item : list) {
-                if (item) {
-                    item->setSpeedLimit(0);
-                }
+        qWarning() << "DownloadManager is null, cannot toggle speed limit";
+    }
+
+    QMutexLocker locker(&mutex);
+    for (auto& list : categories) {
+        for (DownloadItem* item : list) {
+            if (item) {
+                qDebug() << "Updating speed limit for" << item->getFileName() << "to" << limit;
+                item->setSpeedLimit(limit);
+            } else {
+                qWarning() << "Null item in categories list";
             }
         }
     }
@@ -863,7 +888,6 @@ void MainWindow::toggleSpeedLimiter(bool enabled)
     ui->actionOff->setChecked(!enabled);
     scheduleTableUpdate();
 }
-
 void MainWindow::checkForUpdates()
 {
     QMessageBox::information(this, "Check for Updates", "Feature not implemented yet.");
@@ -1019,6 +1043,16 @@ void MainWindow::updateDownloadTable()
         qint64 transferRate = item->getTransferRate();
         QDateTime lastTryDate = item->getLastTryDate();
         QString description = item->getDescription();
+
+        // Handle YouTube download progress if yt-dlp is active
+        if (item->getState() == DownloadItem::Downloading && isYouTubeUrl(item->getUrl().toString())) {
+            // Fallback to estimated values if yt-dlp hasn't reported yet
+            if (totalSize <= 0 && downloadedSize <= 0) {
+                totalSize = 1; // Prevent division by zero
+                downloadedSize = 0;
+                transferRate = 0; // Will update via progress signal
+            }
+        }
 
         QTableWidgetItem* existingItem = ui->downloadsTable->item(row, 0);
         bool rowNeedsUpdate = !existingItem ||
@@ -1388,7 +1422,6 @@ void MainWindow::startDownload(DownloadItem *item)
         scheduleTableUpdate();
     }
 }
-
 void MainWindow::downloadFromYouTube()
 {
     YouTubeDownloadDialog dialog(this);
@@ -1402,7 +1435,7 @@ void MainWindow::downloadFromYouTube()
         QString filePath = dialog.getOutputPath();
         if (!filePath.isEmpty()) {
             QString fileName = dialog.getYtdlArgs().contains("--extract-audio") ? "audio.mp3" : "video.mp4";
-            auto *item = new DownloadItem(youtubeUrl, filePath + "/" + fileName, this);
+            auto *item = new DownloadItem(youtubeUrl, QDir(filePath).filePath(fileName), this); // Ensure valid path
             item->setNumChunks(8);
             item->setState(DownloadItem::Queued);
             item->setLastTryDate(QDateTime::currentDateTime());
@@ -1415,11 +1448,12 @@ void MainWindow::downloadFromYouTube()
             connect(item, &DownloadItem::failed, this, &MainWindow::handleDownloadFailed, Qt::QueuedConnection);
             connect(item, &DownloadItem::stateChanged, this, &MainWindow::scheduleTableUpdate, Qt::QueuedConnection);
 
-            m_downloadManager->downloadYouTubeWithOptions(item, dialog.getYtdlArgs());
+            QStringList ytdlArgs = dialog.getYtdlArgs();
+            if (!ytdlArgs.contains("--add-header")) ytdlArgs << "--add-header" << "User-Agent:Mozilla/5.0"; // Ensure header
+            m_downloadManager->downloadYouTubeWithOptions(item, ytdlArgs);
         }
     }
 }
-
 bool MainWindow::isYouTubeUrl(const QString &url)
 {
     QUrl qurl(url);

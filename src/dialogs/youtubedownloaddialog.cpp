@@ -241,7 +241,6 @@ QStringList YouTubeDownloadDialog::getYtdlArgs() const
         args << "--sponsorblock-list" << sponsorblockFileEdit->text();
     if (cookiesCheck->isChecked() && !cookiesFileEdit->text().isEmpty())
         args << "--cookies" << cookiesFileEdit->text();
-    args << "--restrict-filenames";
     return args;
 }
 
