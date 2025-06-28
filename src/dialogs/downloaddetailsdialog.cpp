@@ -9,7 +9,7 @@ DownloadDetailsDialog::DownloadDetailsDialog(DownloadItem *item, QWidget *parent
 {
     ui->setupUi(this);
     if (!item) {
-        qDebug() << "Warning: DownloadItem is null in DownloadDetailsDialog";
+        qDebug() << "Warning: DownloadItem is null in DownloadDetailsDialog at" << QDateTime::currentDateTime().toString("hh:mm:ss");
         return;
     }
 
@@ -27,31 +27,89 @@ DownloadDetailsDialog::DownloadDetailsDialog(DownloadItem *item, QWidget *parent
     ui->lastTryValueLabel->setText(item->getLastTryDate().toString("yyyy-MM-dd hh:mm"));
     ui->descriptionValueLabel->setText(item->getDescription());
 
-    // Setup timer for chunk progress updates
+    // Setup timer for updates
     m_updateTimer = new QTimer(this);
     connect(m_updateTimer, &QTimer::timeout, this, &DownloadDetailsDialog::updateDetails);
     m_updateTimer->start(1000); // Update every second
 
-    // Initial chunk setup
+    // Handle chunk or single-chunk display
     int numChunks = item->getNumChunks();
+    qDebug() << "DownloadDetailsDialog: Setting up for" << item->getFileName()
+             << ", numChunks:" << numChunks
+             << ", downloadedSize:" << item->getDownloadedSize()
+             << ", totalSize:" << item->getTotalSize()
+             << "at" << QDateTime::currentDateTime().toString("hh:mm:ss");
     ui->chunkLayout->setAlignment(Qt::AlignTop);
-    for (int i = 0; i < numChunks; ++i) {
-        QProgressBar *progressBar = new QProgressBar(ui->chunkScrollArea);
-        progressBar->setMinimumHeight(30);
-        progressBar->setMinimumWidth(200);
-        QLabel *chunkLabel = new QLabel(QString("Chunk %1").arg(i), ui->chunkScrollArea);
-        ui->chunkLayout->addRow(chunkLabel, progressBar);
-        progressBar->setRange(0, item->getTotalSize() / numChunks > 0 ? item->getTotalSize() / numChunks : 100);
-        progressBar->setValue(item->getChunkProgress(i));
-        if (item->getTotalSize() / numChunks > 0) {
-            int percentage = (item->getChunkProgress(i) * 100) / (item->getTotalSize() / numChunks);
-            progressBar->setFormat(QString("%1/%2 (%3%)").arg(formatSize(item->getChunkProgress(i))).arg(formatSize(item->getTotalSize() / numChunks)).arg(percentage));
-        } else {
-            progressBar->setFormat(QString("%1/N/A").arg(formatSize(item->getChunkProgress(i))));
+    if (numChunks == 1) {
+        m_singleChunkProgressBar = new QProgressBar(ui->chunkScrollArea);
+        if (!m_singleChunkProgressBar) {
+            qDebug() << "DownloadDetailsDialog: Failed to create singleChunkProgressBar for" << item->getFileName()
+            << "at" << QDateTime::currentDateTime().toString("hh:mm:ss");
+            return;
         }
+        m_singleChunkProgressBar->setMinimumHeight(30);
+        m_singleChunkProgressBar->setMinimumWidth(200);
+        QLabel *progressLabel = new QLabel(tr("Overall Progress"), ui->chunkScrollArea);
+        if (!progressLabel) {
+            qDebug() << "DownloadDetailsDialog: Failed to create progressLabel for" << item->getFileName()
+            << "at" << QDateTime::currentDateTime().toString("hh:mm:ss");
+            delete m_singleChunkProgressBar;
+            m_singleChunkProgressBar = nullptr;
+            return;
+        }
+        ui->chunkLayout->addRow(progressLabel, m_singleChunkProgressBar);
+        m_singleChunkProgressBar->setRange(0, item->getTotalSize() > 0 ? item->getTotalSize() : 100);
+        qint64 downloaded = item->getDownloadedSize();
+        m_singleChunkProgressBar->setValue(downloaded);
+        if (item->getTotalSize() > 0) {
+            int percentage = (downloaded * 100) / item->getTotalSize();
+            m_singleChunkProgressBar->setFormat(QString("%1/%2 (%3%)").arg(formatSize(downloaded)).arg(formatSize(item->getTotalSize())).arg(percentage));
+        } else {
+            m_singleChunkProgressBar->setFormat(QString("%1/N/A").arg(formatSize(downloaded)));
+        }
+    } else if (numChunks > 1) {
+        for (int i = 0; i < numChunks; ++i) {
+            QProgressBar *progressBar = new QProgressBar(ui->chunkScrollArea);
+            if (!progressBar) {
+                qDebug() << "DownloadDetailsDialog: Failed to create progressBar for chunk" << i << "of" << item->getFileName()
+                << "at" << QDateTime::currentDateTime().toString("hh:mm:ss");
+                for (int j = 0; j < i; ++j) {
+                    QLayoutItem *layoutItem = ui->chunkLayout->itemAt(j * 2 + 1);
+                    if (layoutItem && layoutItem->widget()) delete layoutItem->widget();
+                }
+                return;
+            }
+            progressBar->setMinimumHeight(30);
+            progressBar->setMinimumWidth(200);
+            QLabel *chunkLabel = new QLabel(QString("Chunk %1").arg(i), ui->chunkScrollArea);
+            if (!chunkLabel) {
+                qDebug() << "DownloadDetailsDialog: Failed to create chunkLabel for chunk" << i << "of" << item->getFileName()
+                << "at" << QDateTime::currentDateTime().toString("hh:mm:ss");
+                delete progressBar;
+                for (int j = 0; j < i; ++j) {
+                    QLayoutItem *layoutItem = ui->chunkLayout->itemAt(j * 2 + 1);
+                    if (layoutItem && layoutItem->widget()) delete layoutItem->widget();
+                }
+                return;
+            }
+            ui->chunkLayout->addRow(chunkLabel, progressBar);
+            qint64 chunkTotal = item->getTotalSize() / numChunks;
+            progressBar->setRange(0, chunkTotal > 0 ? chunkTotal : 100);
+            qint64 chunkProgress = item->getChunkProgress(i);
+            progressBar->setValue(chunkProgress);
+            if (chunkTotal > 0) {
+                int percentage = (chunkProgress * 100) / chunkTotal;
+                progressBar->setFormat(QString("%1/%2 (%3%)").arg(formatSize(chunkProgress)).arg(formatSize(chunkTotal)).arg(percentage));
+            } else {
+                progressBar->setFormat(QString("%1/N/A").arg(formatSize(chunkProgress)));
+            }
+        }
+    } else {
+        qDebug() << "DownloadDetailsDialog: Invalid numChunks:" << numChunks << "for" << item->getFileName()
+        << "at" << QDateTime::currentDateTime().toString("hh:mm:ss");
+        return;
     }
 
-    // Connect signals
     connect(item, &DownloadItem::progress, this, &DownloadDetailsDialog::onProgress);
     connect(item, &DownloadItem::stateChanged, this, &DownloadDetailsDialog::onStateChanged);
 }
@@ -59,6 +117,14 @@ DownloadDetailsDialog::DownloadDetailsDialog(DownloadItem *item, QWidget *parent
 DownloadDetailsDialog::~DownloadDetailsDialog()
 {
     if (m_updateTimer) m_updateTimer->stop();
+    // Clean up progress bars
+    int numItems = ui->chunkLayout->count();
+    for (int i = 0; i < numItems; i += 2) {
+        QLayoutItem *item = ui->chunkLayout->itemAt(i + 1); // Get progress bar
+        if (item && item->widget()) {
+            delete item->widget();
+        }
+    }
     delete ui;
 }
 
@@ -70,17 +136,30 @@ void DownloadDetailsDialog::updateDetails()
     ui->transferRateValueLabel->setText(m_item->getTransferRate() > 0 ? QString("%1/s").arg(formatSize(m_item->getTransferRate())) : "N/A");
 
     int numChunks = m_item->getNumChunks();
-    for (int i = 0; i < numChunks; ++i) {
-        QLayoutItem *item = ui->chunkLayout->itemAt(i * 2 + 1); // Skip labels, get progress bars
-        if (item && item->widget()) {
-            QProgressBar *progressBar = qobject_cast<QProgressBar*>(item->widget());
-            if (progressBar) {
-                progressBar->setValue(m_item->getChunkProgress(i));
-                if (m_item->getTotalSize() / numChunks > 0) {
-                    int percentage = (m_item->getChunkProgress(i) * 100) / (m_item->getTotalSize() / numChunks);
-                    progressBar->setFormat(QString("%1/%2 (%3%)").arg(formatSize(m_item->getChunkProgress(i))).arg(formatSize(m_item->getTotalSize() / numChunks)).arg(percentage));
-                } else {
-                    progressBar->setFormat(QString("%1/N/A").arg(formatSize(m_item->getChunkProgress(i))));
+    if (numChunks == 1 && m_singleChunkProgressBar) {
+        qint64 downloaded = m_item->getDownloadedSize();
+        m_singleChunkProgressBar->setValue(downloaded);
+        if (m_item->getTotalSize() > 0) {
+            int percentage = (downloaded * 100) / m_item->getTotalSize();
+            m_singleChunkProgressBar->setFormat(QString("%1/%2 (%3%)").arg(formatSize(downloaded)).arg(formatSize(m_item->getTotalSize())).arg(percentage));
+        } else {
+            m_singleChunkProgressBar->setFormat(QString("%1/N/A").arg(formatSize(downloaded)));
+        }
+    } else if (numChunks > 1) {
+        for (int i = 0; i < numChunks; ++i) {
+            QLayoutItem *item = ui->chunkLayout->itemAt(i * 2 + 1);
+            if (item && item->widget()) {
+                QProgressBar *progressBar = qobject_cast<QProgressBar*>(item->widget());
+                if (progressBar) {
+                    qint64 chunkProgress = m_item->getChunkProgress(i);
+                    progressBar->setValue(chunkProgress);
+                    qint64 chunkTotal = m_item->getTotalSize() / numChunks;
+                    if (chunkTotal > 0) {
+                        int percentage = (chunkProgress * 100) / chunkTotal;
+                        progressBar->setFormat(QString("%1/%2 (%3%)").arg(formatSize(chunkProgress)).arg(formatSize(chunkTotal)).arg(percentage));
+                    } else {
+                        progressBar->setFormat(QString("%1/N/A").arg(formatSize(chunkProgress)));
+                    }
                 }
             }
         }
@@ -92,7 +171,7 @@ void DownloadDetailsDialog::onProgress(qint64 bytesReceived, qint64 bytesTotal)
     if (!m_item) return;
     ui->downloadedSizeValueLabel->setText(formatSize(bytesReceived));
     if (bytesTotal > 0) ui->totalSizeValueLabel->setText(formatSize(bytesTotal));
-    updateDetails(); // Sync chunk progress
+    updateDetails();
 }
 
 void DownloadDetailsDialog::onStateChanged(DownloadItem::State state)

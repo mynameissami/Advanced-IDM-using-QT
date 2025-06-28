@@ -30,6 +30,7 @@
 #include <QRegularExpression>
 #include <QClipboard>
 #include "../utils/utils.h"
+
 bool speedLimitEnabled = false;
 int currentSpeedLimit = 0;
 
@@ -193,10 +194,18 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), ui(new Ui::MainWi
     updateTimer->setInterval(500);
     connect(updateTimer, &QTimer::timeout, this, &MainWindow::updateDownloadTable);
     updateTimer->start();
+
     toggleSpeedLimiter(false);
     setMaxConcurrentDownloads(MAX_CONCURRENT_DOWNLOADS);
-    loadDownloadHistory();
 
+    loadDownloadHistory();
+    qDebug() << "Categories after load:" << categories.keys();
+    for (auto& list : categories) {
+        for (DownloadItem* item : list) {
+            if (item) qDebug() << "Item:" << item->getFileName();
+            else qDebug() << "Null item in category";
+        }
+    }
     //to capture download links throgh extension
     if (!m_server->listen(QHostAddress::LocalHost, 8080)) {
         qDebug() << "Server could not start!";
@@ -346,16 +355,25 @@ void MainWindow::showDownloadDetails()
         return;
     }
 
+    qDebug() << "showDownloadDetails: Creating dialog for" << item->getFileName()
+             << ", numChunks:" << item->getNumChunks()
+             << ", state:" << item->getState()
+             << ", downloadedSize:" << item->getDownloadedSize()
+             << ", totalSize:" << item->getTotalSize()
+             << "at" << QDateTime::currentDateTime().toString("hh:mm:ss");
+
     // Safely delete the existing dialog if it exists
     if (m_detailsDialog) {
         m_detailsDialog->deleteLater();
         m_detailsDialog = nullptr;
+        qDebug() << "showDownloadDetails: Cleared existing m_detailsDialog";
     }
 
     // Create a new dialog
     m_detailsDialog = new DownloadDetailsDialog(item, this);
     if (!m_detailsDialog) {
-        qDebug() << "Failed to create DownloadDetailsDialog";
+        qDebug() << "showDownloadDetails: Failed to create DownloadDetailsDialog for" << item->getFileName()
+        << "at" << QDateTime::currentDateTime().toString("hh:mm:ss");
         return;
     }
 
@@ -364,10 +382,14 @@ void MainWindow::showDownloadDetails()
         if (m_detailsDialog) {
             m_detailsDialog->deleteLater();
             m_detailsDialog = nullptr;
+            qDebug() << "showDownloadDetails: Dialog finished and deleted";
         }
     });
 
-    m_detailsDialog->exec();
+    bool success = m_detailsDialog->exec();
+    qDebug() << "showDownloadDetails: Dialog exec completed with success:" << success
+             << "for" << item->getFileName()
+             << "at" << QDateTime::currentDateTime().toString("hh:mm:ss");
 }
 void MainWindow::openFileLocation(DownloadItem *item)
 {
@@ -859,38 +881,30 @@ void MainWindow::openSpeedLimiterDialog()
     }
 }
 
-void MainWindow::toggleSpeedLimiter(bool enabled)
-{
+void MainWindow::toggleSpeedLimiter(bool enabled) {
     speedLimitEnabled = enabled;
-
     qint64 defaultLimit = 100 * 1024;
     qint64 limit = speedLimitEnabled ? (currentSpeedLimit > 0 ? currentSpeedLimit : defaultLimit) : 0;
     qDebug() << "Toggling speed limit to" << limit << "bytes/s, enabled:" << enabled;
     if (m_downloadManager) {
         m_downloadManager->setGlobalSpeedLimit(limit, speedLimitEnabled);
     } else {
-        qWarning() << "DownloadManager is null, cannot toggle speed limit";
+        qWarning() << "toggleSpeedLimiter: DownloadManager is null";
+        return;
     }
-
     QMutexLocker locker(&mutex);
     for (auto& list : categories) {
         for (DownloadItem* item : list) {
             if (item) {
-                qDebug() << "Updating speed limit for" << item->getFileName() << "to" << limit;
                 item->setSpeedLimit(limit);
             } else {
-                qWarning() << "Null item in categories list";
+                qWarning() << "toggleSpeedLimiter: Null item";
             }
         }
     }
-
     ui->actionOn->setChecked(enabled);
     ui->actionOff->setChecked(!enabled);
     scheduleTableUpdate();
-}
-void MainWindow::checkForUpdates()
-{
-    QMessageBox::information(this, "Check for Updates", "Feature not implemented yet.");
 }
 
 void MainWindow::showAboutDialog()
@@ -910,10 +924,6 @@ void MainWindow::showAboutDialog()
     aboutDialog->show();
 }
 
-void MainWindow::openUserGuide()
-{
-    QDesktopServices::openUrl(QUrl("https://example.com/user-guide"));
-}
 
 void MainWindow::importDownloadList()
 {
@@ -939,16 +949,16 @@ void MainWindow::openConnectionSettings()
     }
 }
 
-DownloadItem* MainWindow::getDownloadItemForRow(int row)
-{
-    QTableWidgetItem* itemCell = ui->downloadsTable->item(row, 0);
-    if (!itemCell) return nullptr;
-    QVariant v = itemCell->data(Qt::UserRole);
-    if (v.isValid() && v.canConvert<DownloadItem*>()) {
-        return v.value<DownloadItem*>();
-    }
-    return nullptr;
-}
+// DownloadItem* MainWindow::getDownloadItemForRow(int row)
+// {
+//     QTableWidgetItem* itemCell = ui->downloadsTable->item(row, 0);
+//     if (!itemCell) return nullptr;
+//     QVariant v = itemCell->data(Qt::UserRole);
+//     if (v.isValid() && v.canConvert<DownloadItem*>()) {
+//         return v.value<DownloadItem*>();
+//     }
+//     return nullptr;
+// }
 
 void MainWindow::refreshLinkForSelectedItem()
 {
@@ -983,157 +993,140 @@ void MainWindow::scheduleTableUpdate()
     }
 }
 
-void MainWindow::updateDownloadTable()
-{
+void MainWindow::updateDownloadTable() {
     qDebug() << "Updating download table, rows:" << ui->downloadsTable->rowCount();
     QList<DownloadItem*> allDownloads;
     for (auto &list : categories) {
-        allDownloads.append(list);
+        for (DownloadItem* item : list) {
+            if (item) allDownloads.append(item);
+            else qWarning() << "updateDownloadTable: Null item in category";
+        }
     }
-
     QSet<DownloadItem*> itemsInTable;
     for (int row = 0; row < ui->downloadsTable->rowCount(); ++row) {
         DownloadItem* item = getDownloadItemForRow(row);
         if (item) itemsInTable.insert(item);
+        else qWarning() << "updateDownloadTable: Null item at row" << row;
     }
-
     bool updated = false;
     for (DownloadItem* item : allDownloads) {
         if (!item) continue;
-        int row;
-        if (!itemRowMap.contains(item)) {
+        int row = itemRowMap.value(item, -1);
+        if (row == -1) {
             row = ui->downloadsTable->rowCount();
             ui->downloadsTable->insertRow(row);
             itemRowMap[item] = row;
-            qDebug() << "Inserted new row" << row << "for" << item->getFileName();
+            qDebug() << "Inserted row" << row << "for" << (item->getFileName().isEmpty() ? "unnamed" : item->getFileName());
             updated = true;
         } else {
-            row = itemRowMap[item];
+            itemsInTable.remove(item);
         }
-
-        itemsInTable.remove(item);
-
-        QString fileName = item->getFileName();
-        if (fileName.isEmpty() || fileName.contains(QRegularExpression("[\\x00-\\x1F\\x7F-\\x9F]"))) {
-            fileName = "unnamed_file_" + QString::number(row);
-            qDebug() << "Invalid filename detected, replaced with" << fileName;
-        }
-        qint64 totalSize = item->getTotalSize();
-        qint64 downloadedSize = item->getDownloadedSize();
-        QString status = [item]() {
-            switch (item->getState()) {
-            case DownloadItem::Queued: return "Queued";
-            case DownloadItem::Downloading: return "Downloading";
-            case DownloadItem::Paused: return "Paused";
-            case DownloadItem::Stopped: return "Stopped";
-            case DownloadItem::Completed: return "Completed";
-            case DownloadItem::Failed: return "Failed";
-            default: return "Unknown";
+        try {
+            QString fileName = item->getFileName();
+            if (fileName.isEmpty() || fileName.contains(QRegularExpression("[\\x00-\\x1F\\x7F-\\x9F]"))) {
+                fileName = "unnamed_file_" + QString::number(row);
+                qDebug() << "Invalid filename, replaced with" << fileName;
             }
-        }();
-        int queuePosition = -1;
-        if (m_downloadManager->isItemActive(item)) {
-            queuePosition = 0;
-        } else {
-            int posInQueue = m_downloadManager->getQueuePosition(item);
-            if (posInQueue >= 0) {
-                queuePosition = posInQueue + 1;
+            qint64 totalSize = item->getTotalSize();
+            if (totalSize < 0) totalSize = 0;
+            qint64 downloadedSize = item->getDownloadedSize();
+            if (downloadedSize < 0) downloadedSize = 0;
+            QString status = [item]() {
+                switch (item->getState()) {
+                case DownloadItem::Queued: return "Queued";
+                case DownloadItem::Downloading: return "Downloading";
+                case DownloadItem::Paused: return "Paused";
+                case DownloadItem::Stopped: return "Stopped";
+                case DownloadItem::Completed: return "Completed";
+                case DownloadItem::Failed: return "Failed";
+                default: return "Unknown";
+                }
+            }();
+            int queuePosition = -1;
+            if (m_downloadManager && m_downloadManager->isItemActive(item)) {
+                queuePosition = 0;
+            } else if (m_downloadManager) {
+                int posInQueue = m_downloadManager->getQueuePosition(item);
+                queuePosition = (posInQueue >= 0) ? posInQueue + 1 : -1;
             }
-        }
-        qint64 transferRate = item->getTransferRate();
-        QDateTime lastTryDate = item->getLastTryDate();
-        QString description = item->getDescription();
-
-        // Handle YouTube download progress if yt-dlp is active
-        if (item->getState() == DownloadItem::Downloading && isYouTubeUrl(item->getUrl().toString())) {
-            // Fallback to estimated values if yt-dlp hasn't reported yet
-            if (totalSize <= 0 && downloadedSize <= 0) {
-                totalSize = 1; // Prevent division by zero
-                downloadedSize = 0;
-                transferRate = 0; // Will update via progress signal
+            qint64 transferRate = item->getTransferRate();
+            if (transferRate < 0) transferRate = 0;
+            QDateTime lastTryDate = item->getLastTryDate();
+            QString description = item->getDescription();
+            QTableWidgetItem* existingItem = ui->downloadsTable->item(row, 0);
+            bool rowNeedsUpdate = !existingItem ||
+                                  existingItem->text() != fileName ||
+                                  ui->downloadsTable->item(row, 1)->text() != formatSize(totalSize) ||
+                                  ui->downloadsTable->item(row, 2)->text() != status ||
+                                  ui->downloadsTable->item(row, 3)->text() != (queuePosition >= 0 ? QString::number(queuePosition) : "-") ||
+                                  ui->downloadsTable->item(row, 5)->text() != (transferRate > 0 ? QString("%1/s").arg(formatSize(transferRate).remove(QRegularExpression("\\s*[A-Z]+"))) : "-") ||
+                                  ui->downloadsTable->item(row, 4)->text() != (status == "Downloading" && transferRate > 0 && totalSize > 0 ? formatTimeLeft((totalSize - downloadedSize) / (transferRate > 0 ? transferRate : 1)) : "-");
+            if (rowNeedsUpdate) {
+                updated = true;
+                QString sizeText = formatSize(totalSize);
+                QString timeLeft = "-";
+                if (status == "Downloading" && transferRate > 0 && totalSize > 0) {
+                    qint64 remaining = totalSize - downloadedSize;
+                    qint64 secondsLeft = remaining / (transferRate > 0 ? transferRate : 1);
+                    timeLeft = formatTimeLeft(secondsLeft);
+                }
+                QString rateText = transferRate > 0 ? QString("%1/s").arg(formatSize(transferRate).remove(QRegularExpression("\\s*[A-Z]+"))) : "-";
+                QTableWidgetItem* itemCell = new QTableWidgetItem(fileName);
+                itemCell->setData(Qt::UserRole, QVariant::fromValue(item));
+                itemCell->setTextAlignment(Qt::AlignLeft | Qt::AlignVCenter);
+                QTableWidgetItem* sizeItem = new QTableWidgetItem(sizeText);
+                sizeItem->setTextAlignment(Qt::AlignRight | Qt::AlignVCenter);
+                QTableWidgetItem* statusItem = new QTableWidgetItem(status);
+                statusItem->setTextAlignment(Qt::AlignCenter | Qt::AlignVCenter);
+                QTableWidgetItem* queueItem = new QTableWidgetItem(queuePosition >= 0 ? QString::number(queuePosition) : "-");
+                queueItem->setTextAlignment(Qt::AlignCenter | Qt::AlignVCenter);
+                QTableWidgetItem* timeItem = new QTableWidgetItem(timeLeft);
+                timeItem->setTextAlignment(Qt::AlignCenter | Qt::AlignVCenter);
+                QTableWidgetItem* rateItem = new QTableWidgetItem(rateText);
+                rateItem->setTextAlignment(Qt::AlignRight | Qt::AlignVCenter);
+                QTableWidgetItem* dateItem = new QTableWidgetItem(lastTryDate.isValid() ? lastTryDate.toString("yyyy-MM-dd hh:mm") : "-");
+                dateItem->setTextAlignment(Qt::AlignCenter | Qt::AlignVCenter);
+                QTableWidgetItem* descItem = new QTableWidgetItem(description);
+                descItem->setTextAlignment(Qt::AlignLeft | Qt::AlignVCenter);
+                ui->downloadsTable->setItem(row, 0, itemCell);
+                ui->downloadsTable->setItem(row, 1, sizeItem);
+                ui->downloadsTable->setItem(row, 2, statusItem);
+                ui->downloadsTable->setItem(row, 3, queueItem);
+                ui->downloadsTable->setItem(row, 4, timeItem);
+                ui->downloadsTable->setItem(row, 5, rateItem);
+                ui->downloadsTable->setItem(row, 6, dateItem);
+                ui->downloadsTable->setItem(row, 7, descItem);
             }
-        }
-
-        QTableWidgetItem* existingItem = ui->downloadsTable->item(row, 0);
-        bool rowNeedsUpdate = !existingItem ||
-                              existingItem->text() != fileName ||
-                              ui->downloadsTable->item(row, 1)->text() != formatSize(totalSize) ||
-                              ui->downloadsTable->item(row, 2)->text() != status ||
-                              ui->downloadsTable->item(row, 3)->text() != (queuePosition >= 0 ? QString::number(queuePosition) : "-") ||
-                              ui->downloadsTable->item(row, 5)->text() != (transferRate > 0 ? QString("%1/s").arg(formatSize(transferRate).remove(QRegularExpression("\\s*[A-Z]+"))) : "-") ||
-                              ui->downloadsTable->item(row, 4)->text() != (status == "Downloading" && transferRate > 0 && totalSize > 0 ? formatTimeLeft((totalSize - downloadedSize) / (transferRate > 0 ? transferRate : 1)) : "-");
-
-        if (rowNeedsUpdate) {
-            qDebug() << "Updating row" << row << "for" << fileName
-                     << "Size:" << totalSize << "Downloaded:" << downloadedSize
-                     << "Status:" << status << "Queue Pos:" << queuePosition;
-            updated = true;
-
-            QString sizeText = formatSize(totalSize);
-            QString timeLeft = "-";
-            if (status == "Downloading" && transferRate > 0 && totalSize > 0) {
-                qint64 remaining = totalSize - downloadedSize;
-                qint64 secondsLeft = remaining / (transferRate > 0 ? transferRate : 1);
-                timeLeft = formatTimeLeft(secondsLeft);
-            }
-
-            QString rateText = transferRate > 0 ? QString("%1/s").arg(formatSize(transferRate).remove(QRegularExpression("\\s*[A-Z]+"))) : "-";
-
-            QTableWidgetItem* itemCell = new QTableWidgetItem(fileName);
-            itemCell->setData(Qt::UserRole, QVariant::fromValue(item));
-            itemCell->setTextAlignment(Qt::AlignLeft | Qt::AlignVCenter);
-
-            QTableWidgetItem* sizeItem = new QTableWidgetItem(sizeText);
-            sizeItem->setTextAlignment(Qt::AlignRight | Qt::AlignVCenter);
-
-            QTableWidgetItem* statusItem = new QTableWidgetItem(status);
-            statusItem->setTextAlignment(Qt::AlignCenter | Qt::AlignVCenter);
-
-            QTableWidgetItem* queueItem = new QTableWidgetItem(queuePosition >= 0 ? QString::number(queuePosition) : "-");
-            queueItem->setTextAlignment(Qt::AlignCenter | Qt::AlignVCenter);
-
-            QTableWidgetItem* timeItem = new QTableWidgetItem(timeLeft);
-            timeItem->setTextAlignment(Qt::AlignCenter | Qt::AlignVCenter);
-
-            QTableWidgetItem* rateItem = new QTableWidgetItem(rateText);
-            rateItem->setTextAlignment(Qt::AlignRight | Qt::AlignVCenter);
-
-            QTableWidgetItem* dateItem = new QTableWidgetItem(lastTryDate.isValid() ? lastTryDate.toString("yyyy-MM-dd hh:mm") : "-");
-            dateItem->setTextAlignment(Qt::AlignCenter | Qt::AlignVCenter);
-
-            QTableWidgetItem* descItem = new QTableWidgetItem(description);
-            descItem->setTextAlignment(Qt::AlignLeft | Qt::AlignVCenter);
-
-            ui->downloadsTable->setItem(row, 0, itemCell);
-            ui->downloadsTable->setItem(row, 1, sizeItem);
-            ui->downloadsTable->setItem(row, 2, statusItem);
-            ui->downloadsTable->setItem(row, 3, queueItem);
-            ui->downloadsTable->setItem(row, 4, timeItem);
-            ui->downloadsTable->setItem(row, 5, rateItem);
-            ui->downloadsTable->setItem(row, 6, dateItem);
-            ui->downloadsTable->setItem(row, 7, descItem);
+        } catch (const std::exception& e) {
+            qWarning() << "Exception in updateDownloadTable for item:" << (item ? item->getFileName() : "null") << e.what();
         }
     }
-
     for (DownloadItem* item : itemsInTable) {
-        if (itemRowMap.contains(item)) {
+        if (item && itemRowMap.contains(item)) {
             int row = itemRowMap[item];
             ui->downloadsTable->removeRow(row);
             itemRowMap.remove(item);
-            qDebug() << "Removed stale row for" << item->getFileName();
+            qDebug() << "Removed row for" << item->getFileName();
             updated = true;
         }
     }
-
     if (updated) {
         ui->downloadsTable->resizeColumnsToContents();
         ui->downloadsTable->viewport()->update();
         QApplication::processEvents();
     } else {
-        qDebug() << "No changes in download table, skipping UI update";
+        qDebug() << "No changes, skipping update";
     }
 }
 
+DownloadItem* MainWindow::getDownloadItemForRow(int row) {
+    if (row < 0 || row >= ui->downloadsTable->rowCount()) return nullptr;
+    QTableWidgetItem* item = ui->downloadsTable->item(row, 0);
+    if (!item) return nullptr;
+    DownloadItem* downloadItem = item->data(Qt::UserRole).value<DownloadItem*>();
+    qDebug() << "getDownloadItemForRow:" << row << "returned" << (downloadItem ? downloadItem->getFileName() : "null");
+    return downloadItem;
+}
 void MainWindow::saveDownloadListToFile(const QString &filename)
 {
     QJsonArray jsonArray;
@@ -1235,7 +1228,7 @@ void MainWindow::saveDownloadHistory()
     QJsonArray jsonArray;
     for (const auto& list : categories) {
         for (DownloadItem* item : list) {
-            if (!item) continue;
+            if (!item) continue; // Skip null items
             QJsonObject itemObj;
             itemObj["url"] = item->getUrl().toString();
             itemObj["filePath"] = item->getFullFilePath();
@@ -1256,28 +1249,40 @@ void MainWindow::saveDownloadHistory()
             itemObj["lastTryDate"] = item->getLastTryDate().toString(Qt::ISODate);
             itemObj["description"] = item->getDescription();
             itemObj["paused"] = (item->getState() == DownloadItem::Paused);
+            itemObj["numChunks"] = item->getNumChunks(); // Add numChunks to save
             jsonArray.append(itemObj);
         }
     }
 
     QString path = QStandardPaths::writableLocation(QStandardPaths::DesktopLocation);
     QDir dir(path);
-    if (!dir.exists()) dir.mkpath(".");
+    if (!dir.exists()) {
+        if (!dir.mkpath(".")) {
+            qWarning() << "saveDownloadHistory: Failed to create directory:" << path;
+            return;
+        }
+    }
 
     QFile file(path + "/download_history.json");
     if (jsonArray.isEmpty()) {
         if (file.exists()) {
-            qDebug() << "Download list empty. Removing history file...";
+            qDebug() << "saveDownloadHistory: Download list empty. Removing history file...";
             file.remove();
         }
         return;
     }
 
+    if (!file.open(QIODevice::WriteOnly)) {
+        qWarning() << "saveDownloadHistory: Cannot open file for writing:" << file.fileName();
+        return;
+    }
+
     QJsonDocument doc(jsonArray);
-    if (file.open(QIODevice::WriteOnly)) {
-        file.write(doc.toJson());
+    if (file.write(doc.toJson()) == -1) {
+        qWarning() << "saveDownloadHistory: Failed to write to file:" << file.fileName();
+    } else {
         file.close();
-        qDebug() << "Saved download history with" << jsonArray.size() << "items.";
+        qDebug() << "saveDownloadHistory: Saved download history with" << jsonArray.size() << "items.";
     }
 }
 
@@ -1288,12 +1293,14 @@ void MainWindow::loadDownloadHistory()
 
     QFile file(fullPath);
     if (!file.exists()) {
-        qDebug() << "No download history file found at:" << fullPath;
+        qDebug() << "loadDownloadHistory: No download history file found at:" << fullPath
+                 << "at" << QDateTime::currentDateTime().toString("hh:mm:ss");
         return;
     }
 
     if (!file.open(QIODevice::ReadOnly)) {
-        qWarning() << "Could not open download history file:" << fullPath;
+        qWarning() << "loadDownloadHistory: Could not open download history file:" << fullPath
+                   << "at" << QDateTime::currentDateTime().toString("hh:mm:ss");
         return;
     }
 
@@ -1302,7 +1309,8 @@ void MainWindow::loadDownloadHistory()
 
     QJsonDocument doc = QJsonDocument::fromJson(data);
     if (!doc.isArray()) {
-        qWarning() << "Invalid JSON format in download history.";
+        qWarning() << "loadDownloadHistory: Invalid JSON format in download history."
+                   << "at" << QDateTime::currentDateTime().toString("hh:mm:ss");
         return;
     }
 
@@ -1313,9 +1321,18 @@ void MainWindow::loadDownloadHistory()
 
         QUrl url(itemObj["url"].toString());
         QString filePath = itemObj["filePath"].toString();
-        if (!url.isValid()) continue;
+        if (!url.isValid()) {
+            qWarning() << "loadDownloadHistory: Invalid URL in history:" << itemObj["url"].toString()
+            << "at" << QDateTime::currentDateTime().toString("hh:mm:ss");
+            continue;
+        }
 
         auto *item = new DownloadItem(url, filePath, this);
+        if (!item) {
+            qWarning() << "loadDownloadHistory: Failed to create DownloadItem for URL:" << url.toString()
+            << "at" << QDateTime::currentDateTime().toString("hh:mm:ss");
+            continue;
+        }
         item->setFileName(itemObj["fileName"].toString());
         item->setTotalSize(itemObj["totalSize"].toString().toLongLong());
         item->setDownloadedSize(itemObj["downloadedSize"].toString().toLongLong());
@@ -1328,7 +1345,30 @@ void MainWindow::loadDownloadHistory()
         else if (statusStr == "Failed") item->setState(DownloadItem::Failed);
         item->setLastTryDate(QDateTime::fromString(itemObj["lastTryDate"].toString(), Qt::ISODate));
         item->setDescription(itemObj["description"].toString());
-        item->setNumChunks(8);
+        int numChunks = itemObj.contains("numChunks") ? itemObj["numChunks"].toInt(8) : 8;
+        item->setNumChunks(numChunks);
+
+        // Safely handle chunk progress only for initialized items
+        qint64 expectedTotal = item->getTotalSize();
+        qint64 sumChunks = 0;
+        if (numChunks == 1) {
+            sumChunks = item->getDownloadedSize(); // Single-chunk fallback
+        } else if (numChunks > 1) {
+            // Only check if getChunkProgress is implemented and safe
+            qint64 chunkProgress = item->getChunkProgress(0); // Test first chunk
+            if (chunkProgress >= 0) {
+                sumChunks += chunkProgress;
+                qDebug() << "loadDownloadHistory: Chunk 0 progress:" << chunkProgress << "for" << item->getFileName();
+            } else {
+                qWarning() << "loadDownloadHistory: Invalid chunk progress for" << item->getFileName();
+            }
+        }
+        qDebug() << "loadDownloadHistory: Loaded" << item->getFileName()
+                 << ", numChunks:" << numChunks
+                 << ", downloadedSize:" << item->getDownloadedSize()
+                 << ", sumChunks:" << sumChunks
+                 << ", totalSize:" << expectedTotal
+                 << "at" << QDateTime::currentDateTime().toString("hh:mm:ss");
 
         connect(item, &DownloadItem::progress, this, &MainWindow::handleDownloadProgress, Qt::QueuedConnection);
         connect(item, &DownloadItem::finished, this, &MainWindow::handleDownloadFinished, Qt::QueuedConnection);
@@ -1344,10 +1384,10 @@ void MainWindow::loadDownloadHistory()
             m_downloadManager->addToQueue(item);
         }
     }
-    qDebug() << "Loaded" << jsonArray.size() << "download items from history.";
+    qDebug() << "loadDownloadHistory: Loaded" << jsonArray.size() << "download items from history."
+             << "at" << QDateTime::currentDateTime().toString("hh:mm:ss");
     scheduleTableUpdate();
 }
-
 void MainWindow::openPreferences()
 {
     PreferencesDialog dialog(this);

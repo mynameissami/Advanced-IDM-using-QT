@@ -2,6 +2,7 @@
 #define DOWNLOADDETAILSDIALOG_H
 
 #include <QDialog>
+#include <qprogressbar.h>
 #include "../network/downloaditem.h"
 
 namespace Ui {
@@ -25,6 +26,7 @@ private:
     Ui::DownloadDetailsDialog *ui;
     DownloadItem *m_item;
     QTimer *m_updateTimer;
+    QProgressBar *m_singleChunkProgressBar = nullptr; // Added for single-chunk support
     QString formatSize(qint64 bytes) const;
 };
 

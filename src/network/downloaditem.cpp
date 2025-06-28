@@ -10,8 +10,10 @@ DownloadItem::DownloadItem(const QUrl &url, const QString &filePath, QObject *pa
     : QObject(parent), m_url(url), m_fullFilePath(filePath), m_totalSize(-1), m_downloadedSize(0),
     m_state(Queued), m_reply(nullptr), m_manager(new QNetworkAccessManager(this)), m_transferRate(0),
     m_speedLimit(0), m_bytesReadThisSecond(0), m_numChunks(1), m_supportsRange(true), m_file(nullptr),
-    m_isSingleChunk(false), m_lastUpdateTime(QDateTime::currentMSecsSinceEpoch())
+    m_isSingleChunk(false), m_lastUpdateTime(QDateTime::currentMSecsSinceEpoch()), m_chunkProgress(nullptr)
 {
+    m_chunkProgress = new qint64[1]; // Allocate array
+    m_chunkProgress[0] = 0;
     m_speedLimitTimer.start();
     m_rateTimer = new QTimer(this);
     connect(m_rateTimer, &QTimer::timeout, this, &DownloadItem::updateTransferRate);
@@ -44,6 +46,7 @@ DownloadItem::~DownloadItem()
     delete m_worker;
     m_worker = nullptr;
     delete m_manager; // Direct deletion to ensure cleanup
+    delete[] m_chunkProgress;
 }
 
 /**
@@ -66,6 +69,20 @@ void DownloadItem::setState(State state)
     if (m_state != state) {
         m_state = state;
         emit stateChanged(m_state);
+    }
+}
+void DownloadItem::setNumChunks(int numChunks) {
+    if (numChunks < 1) numChunks = 1;
+    if (numChunks == m_numChunks) return;
+    delete[] m_chunkProgress;
+    m_numChunks = numChunks;
+    m_chunkProgress = new qint64[numChunks]();
+    // Distribute downloadedSize across chunks if needed
+    if (m_downloadedSize > 0 && m_totalSize > 0) {
+        qint64 perChunk = m_downloadedSize / numChunks;
+        for (int i = 0; i < numChunks; ++i) {
+            m_chunkProgress[i] = (i == numChunks - 1) ? (m_downloadedSize - (perChunk * (numChunks - 1))) : perChunk;
+        }
     }
 }
 
@@ -707,9 +724,9 @@ void DownloadItem::updateTransferRate()
     }
 }
 
-qint64 DownloadItem::getChunkProgress(int chunkIndex) const
-{
-    return chunkIndex >= 0 && chunkIndex < m_numChunks ? m_chunkDownloaded[chunkIndex] : 0;
+qint64 DownloadItem::getChunkProgress(int chunkIndex) const {
+    if (chunkIndex < 0 || chunkIndex >= m_numChunks || !m_chunkProgress) return 0;
+    return m_chunkProgress[chunkIndex];
 }
 
 qint64 DownloadItem::getCurrentSpeedLimit()

@@ -35,7 +35,7 @@ public:
     void setProxy(const QNetworkProxy &proxy);
     void setSpeedLimit(qint64 bytesPerSec);
     void setFileName(const QString &name) { m_fileName = name; }
-    void setNumChunks(int num) { m_numChunks = num; }
+    void setNumChunks(int num);
     void setUrl(const QUrl &url) { m_url = url; }
     void setLastTryDate(const QDateTime &date) { m_lastTryDate = date; }
     void setDescription(const QString &desc) { m_description = desc; }
@@ -125,6 +125,7 @@ private:
     QString m_description;
     QMutex m_chunkMutex;
     bool validateChunk(int chunkIndex);
+    qint64* m_chunkProgress;
 };
 
 // Definition of SpeedLimitWorker outside DownloadItem
